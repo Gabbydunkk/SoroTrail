@@ -322,6 +322,23 @@ type DeliveryAttempt struct {
 	CreatedAt      time.Time `json:"created_at"`
 }
 
+// AddressRef records one address→event mapping. Populated during ingestion
+// from decoded event topics and value JSON.
+type AddressRef struct {
+	Address string `json:"address"`
+	EventID string `json:"event_id"`
+	Role    string `json:"role"`
+}
+
+// AddressSummary is the aggregate view returned by GetAddressSummary.
+type AddressSummary struct {
+	Address          string   `json:"address"`
+	FirstSeenLedger  int64    `json:"first_seen_ledger"`
+	LastSeenLedger   int64    `json:"last_seen_ledger"`
+	EventCount       int64    `json:"event_count"`
+	DistinctContracts []string `json:"distinct_contracts"`
+}
+
 // Stats summarizes what the indexer has stored so far. VerifiedThroughLedger
 // is the inclusive highest ledger whose stored events have been confirmed
 // to match a fresh RPC fetch; 0 means no ledger has been verified yet.
@@ -510,6 +527,22 @@ type Store interface {
 	// SetContractSpec persists a JSON-serialized spec keyed by wasm_hash
 	// and contract_id so subsequent lookups avoid an RPC round trip.
 	SetContractSpec(ctx context.Context, wasmHash, contractID string, specJSON []byte) error
+
+	// UpsertAddressRefs inserts address→event index rows idempotently.
+	// Duplicate (address, event_id, role) combinations are silently ignored
+	// so re-ingesting an event never duplicates its address rows.
+	UpsertAddressRefs(ctx context.Context, refs []AddressRef) error
+	// QueryAddressEvents returns events involving the given address, in
+	// chronological order (by event_id), cursor-paginated. The same filter
+	// semantics as QueryEvents apply: contract_id, type, ledger range.
+	QueryAddressEvents(ctx context.Context, address string, f EventFilter) ([]Event, string, error)
+	// CountAddressEvents returns the total number of events involving the
+	// given address (ignoring pagination).
+	CountAddressEvents(ctx context.Context, address string) (int64, error)
+	// GetAddressSummary returns aggregate information about an address's
+	// event history: first/last seen ledger, total event count, and
+	// distinct contracts interacted with.
+	GetAddressSummary(ctx context.Context, address string) (AddressSummary, error)
 
 	Stats(ctx context.Context) (Stats, error)
 	Ping(ctx context.Context) error

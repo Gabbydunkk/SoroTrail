@@ -55,6 +55,8 @@ func dispatch(args []string) error {
 		return runReplay(args[1:])
 	case "backfill":
 		return runBackfill(args[1:])
+	case "index-addresses":
+		return runIndexAddresses(args[1:])
 	case "help", "-h", "--help":
 		usage()
 		return nil
@@ -120,6 +122,18 @@ func run() error {
 	}
 
 	rpcClient := rpc.NewHTTPClient(cfg.RPCURL)
+	// Wrap the raw RPC client with configurable retry/backoff so transient
+	// failures (connection drops, rate limits, server errors) are retried
+	// automatically before surfacing to the caller. The retry client wraps
+	// rawClient, and countingClient wraps retryClient, so error counters
+	// include all retry attempts and the /stats view reflects the actual
+	// RPC error rate after retries have been exhausted.
+	rawClient := rpc.NewRetryClient(rpcClient, rpc.RetryConfig{
+		MaxAttempts: cfg.RPCMaxAttempts,
+		BaseBackoff: cfg.RPCBaseBackoff,
+		MaxBackoff:  cfg.RPCMaxBackoff,
+		Jitter:      cfg.RPCJitter,
+	})
 	bcast := broadcast.New(broadcast.DefaultBufferSize)
 	// Webhook delivery runs alongside ingestion — the notifier is attached
 	// to the ingester so events flow to subscriber callbacks asynchronously.
@@ -130,10 +144,12 @@ func run() error {
 	specFetcher := spec.NewFetcher(rpcClient)
 	specEnricher := spec.NewEnricher(specFetcher, specCache, log)
 
-	// Wrap the raw RPC client so per-method error totals are tracked and
-	// surfaced via /stats. specFetcher already holds a reference to the
-	// unwrapped client (spec lookups are not counted as ingestion errors).
-	countingClient := rpc.NewCountingClient(rpcClient)
+	// Wrap the retry client so per-method error totals are tracked and
+	// surfaced via /stats. The error counters see errors after all retries
+	// are exhausted — a transient blip that succeeds on the second attempt
+	// never appears in the error totals. specFetcher still uses the
+	// non-retry rpcClient (spec lookups are not counted as ingestion errors).
+	countingClient := rpc.NewCountingClient(rawClient)
 	api.SetRPCCounter(countingClient)
 
 	ing := ingester.New(countingClient, st, decode.XDRDecoder{}, log, ingester.Options{
@@ -177,9 +193,32 @@ func run() error {
 		SlowQueryThreshold: cfg.APISlowQueryThreshold,
 		Logger:             log,
 	})
+	// API key authentication: when AUTH_ENABLED is true, every endpoint
+	// except /health requires a valid API key. Admin API key management
+	// endpoints are also mounted. The bootstrap ADMIN_API_KEY seeds a
+	// first key at startup if the table is empty.
+	var authHandler *api.AuthHandler
+	var adminAPI *api.AdminAPIHandler
+	if pool != nil {
+		keyStore := store.NewAPIKeyStore(pool)
+		if cfg.AuthEnabled && cfg.AdminAPIKey != "" {
+			plaintext, err := keyStore.SeedAdminAPIKey(ctx, "admin")
+			if err != nil {
+				return err
+			}
+			if plaintext != "" {
+				log.Info("seeded initial admin API key; save it now — it will never be shown again",
+					"prefix", plaintext[:10]+"...")
+			}
+		}
+		authHandler = api.NewAuthHandler(keyStore, cfg.AuthEnabled)
+		adminAPI = api.NewAdminAPIHandler(keyStore, log)
+	}
+
 	apiServer := api.New(apiStore, countingClient, log, cfg.APIKey, specEnricher).WithBroadcaster(bcast)
 	apiServer.SetRateLimiter(limiter)
 	apiServer.SetCompressMinSize(cfg.CompressMinSize)
+	apiServer.WithAuth(authHandler).WithAdminAPI(adminAPI)
 
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,

@@ -88,6 +88,8 @@ type Server struct {
 	recoverer *Recoverer
 	bcast     *broadcast.Broadcaster
 	metrics   *metrics.HTTPMetrics
+	auth      *AuthHandler
+	adminAPI  *AdminAPIHandler
 	// compressMinSize is the body size at which responses start being
 	// compressed. The zero value means CompressMinSize, so compression is on
 	// by default; negative disables the middleware entirely.
@@ -113,6 +115,20 @@ func New(st store.Store, rpcClient rpc.Client, log *slog.Logger, apiKey string, 
 	return s
 }
 
+// WithAuth attaches the auth middleware to the server. When authEnabled
+// is false, the middleware is a pass-through. Call before ListenAndServe.
+func (s *Server) WithAuth(auth *AuthHandler) *Server {
+	s.auth = auth
+	return s
+}
+
+// WithAdminAPI attaches the admin API key management endpoints. They are
+// mounted under /admin/api-keys and require a valid API key themselves.
+func (s *Server) WithAdminAPI(admin *AdminAPIHandler) *Server {
+	s.adminAPI = admin
+	return s
+}
+
 // SetRateLimiter wires a per-client rate limiter into the router. Pass
 // nil to leave the limiter disabled (the default — no behavior change).
 // The limiter's Start/Stop lifecycle is owned by main, not by the Server.
@@ -135,6 +151,13 @@ func (s *Server) Router() http.Handler {
 	r.Use(s.metrics.Middleware)
 	r.Use(s.recoverer.Middleware)
 	r.Use(middleware.Timeout(30 * time.Second))
+	// Auth middleware sits early so every authenticated request is checked
+	// before any processing begins. When AUTH_ENABLED is false (the default)
+	// this is a pass-through and the binary behaves identically to pre-auth
+	// builds, matching the existing no-op middleware pattern.
+	if s.auth != nil {
+		r.Use(s.auth.Middleware)
+	}
 	// Compression sits outside the limiter so a 429 is written through the
 	// same encoding path as any other small response (i.e. sent as-is), and
 	// inside Recoverer so a panic mid-body can't leave a truncated gzip
@@ -159,6 +182,12 @@ func (s *Server) Router() http.Handler {
 	r.Get("/stats", s.handleStats)
 	r.Get("/events/ws", s.handleEventStreamWS)
 
+	// Address activity index: retrieve events by address and get address
+	// summary statistics. Both endpoints support cursor-based pagination
+	// and event filters (contract_id, type, ledger range).
+	r.Get("/addresses/{address}/events", s.handleAddressEvents)
+	r.Get("/addresses/{address}/summary", s.handleAddressSummary)
+
 	// Watched-contracts management: writes and updates to the runtime
 	// filter list. Always auth-gated, even when AUTH_ENABLED would be
 	// false elsewhere — that asymmetry is intentional and part of the
@@ -178,6 +207,13 @@ func (s *Server) Router() http.Handler {
 	r.Put("/subscriptions/{id}", s.handleUpdateSubscription)
 	r.Delete("/subscriptions/{id}", s.handleDeleteSubscription)
 	r.Get("/subscriptions/{id}/deliveries", s.handleListDeliveries)
+
+	// Admin API key management (only when AUTH_ENABLED is true).
+	if s.adminAPI != nil {
+		r.Post("/admin/api-keys", s.adminAPI.HandleCreateKey)
+		r.Get("/admin/api-keys", s.adminAPI.HandleListKeys)
+		r.Delete("/admin/api-keys/{id}", s.adminAPI.HandleRevokeKey)
+	}
 
 	return r
 }

@@ -189,6 +189,15 @@ func (m *mockStore) GetContractSpec(context.Context, string) ([]byte, error) {
 }
 func (m *mockStore) SetContractSpec(context.Context, string, string, []byte) error { return nil }
 
+func (m *mockStore) UpsertAddressRefs(context.Context, []store.AddressRef) error { return nil }
+func (m *mockStore) QueryAddressEvents(context.Context, string, store.EventFilter) ([]store.Event, string, error) {
+	return nil, "", nil
+}
+func (m *mockStore) CountAddressEvents(context.Context, string) (int64, error) { return 0, nil }
+func (m *mockStore) GetAddressSummary(context.Context, string) (store.AddressSummary, error) {
+	return store.AddressSummary{}, nil
+}
+
 // Subscription stubs for the webhook feature.
 func (m *mockStore) CreateSubscription(_ context.Context, sub store.Subscription) (store.Subscription, error) {
 	sub.ID = 1
