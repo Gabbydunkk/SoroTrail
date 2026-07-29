@@ -60,10 +60,10 @@ type Config struct {
 	// the maximum backoff cap, and whether random jitter is added between
 	// attempts. Applied uniformly to every RPC call (getEvents,
 	// getLatestLedger, getHealth, getLedgerEntries).
-	RPCMaxAttempts  int           `env:"RPC_MAX_ATTEMPTS" envDefault:"3"`
-	RPCBaseBackoff  time.Duration `env:"RPC_BASE_BACKOFF" envDefault:"500ms"`
-	RPCMaxBackoff   time.Duration `env:"RPC_MAX_BACKOFF" envDefault:"30s"`
-	RPCJitter       bool          `env:"RPC_JITTER" envDefault:"true"`
+	RPCMaxAttempts int           `env:"RPC_MAX_ATTEMPTS" envDefault:"3"`
+	RPCBaseBackoff time.Duration `env:"RPC_BASE_BACKOFF" envDefault:"500ms"`
+	RPCMaxBackoff  time.Duration `env:"RPC_MAX_BACKOFF" envDefault:"30s"`
+	RPCJitter      bool          `env:"RPC_JITTER" envDefault:"true"`
 
 	// Audit config. AUDIT_ENABLED=false (default) disables the auditor
 	// entirely; the binary behaves exactly like the pre-audit build.

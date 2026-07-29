@@ -10,22 +10,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// errRetryable is a test helper that satisfies the retryable-error contract
-// for isRetryable: it wraps a JSON-RPC server error (code 0).
-type errRetryable struct{}
-
-func (e errRetryable) Error() string { return "retryable error" }
-
-// errFatal is a test helper that does not satisfy isRetryable.
-type errFatal struct{}
-
-func (e errFatal) Error() string { return "fatal error" }
-
 // mockClient implements Client for testing.
 type mockClient struct {
-	getEvents       func(ctx context.Context, req GetEventsRequest) (GetEventsResponse, error)
-	getLatestLedger func(ctx context.Context) (LatestLedger, error)
-	getHealth       func(ctx context.Context) (Health, error)
+	getEvents        func(ctx context.Context, req GetEventsRequest) (GetEventsResponse, error)
+	getLatestLedger  func(ctx context.Context) (LatestLedger, error)
+	getHealth        func(ctx context.Context) (Health, error)
 	getLedgerEntries func(ctx context.Context, req GetLedgerEntriesRequest) (GetLedgerEntriesResponse, error)
 }
 
@@ -156,8 +145,8 @@ func TestRetryClient_BackoffRespectsMax(t *testing.T) {
 
 func TestIsRetryable_ErrorCodes(t *testing.T) {
 	tests := []struct {
-		err      error
-		name     string
+		err       error
+		name      string
 		retryable bool
 	}{
 		{&Error{Code: 0, Message: "server error"}, "code 0", true},
