@@ -83,12 +83,11 @@ func (c *ClickHouse) GetEvent(ctx context.Context, id string, sc Scope) (Event, 
 }
 
 func (c *ClickHouse) EventExists(ctx context.Context, id string, sc Scope) (bool, error) {
-func (c *ClickHouse) GetEventsByTxHash(ctx context.Context, txHash, excludeID string) ([]Event, error) {
-	return nil, nil
+	return false, nil
 }
 
-func (c *ClickHouse) EventExists(ctx context.Context, id string) (bool, error) {
-	return false, nil
+func (c *ClickHouse) GetEventsByTxHash(ctx context.Context, txHash, excludeID string) ([]Event, error) {
+	return nil, nil
 }
 
 func (c *ClickHouse) QueryEvents(ctx context.Context, f EventFilter) ([]Event, string, error) {
@@ -225,4 +224,20 @@ func (c *ClickHouse) DeleteDeadLetter(context.Context, int64) error {
 
 func (c *ClickHouse) Ping(ctx context.Context) error {
 	return nil
+}
+
+func (c *ClickHouse) UpsertAddressRefs(ctx context.Context, refs []AddressRef) error {
+	return nil
+}
+
+func (c *ClickHouse) QueryAddressEvents(ctx context.Context, address string, f EventFilter) ([]Event, string, error) {
+	return nil, "", nil
+}
+
+func (c *ClickHouse) CountAddressEvents(ctx context.Context, address string) (int64, error) {
+	return 0, nil
+}
+
+func (c *ClickHouse) GetAddressSummary(ctx context.Context, address string) (AddressSummary, error) {
+	return AddressSummary{}, nil
 }

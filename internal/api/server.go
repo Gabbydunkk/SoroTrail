@@ -119,6 +119,8 @@ type Server struct {
 	recoverer *Recoverer
 	bcast     *broadcast.Broadcaster
 	metrics   *metrics.HTTPMetrics
+	auth      *AuthHandler
+	adminAPI  *AdminAPIHandler
 	// compressMinSize is the body size at which responses start being
 	// compressed. The zero value means CompressMinSize, so compression is on
 	// by default; negative disables the middleware entirely.
@@ -373,6 +375,13 @@ func (s *Server) Router() http.Handler {
 		r.Post("/admin/tenants/{id}/keys", s.handleCreateTenantKey)
 		r.Delete("/admin/keys/{key_id}", s.handleRevokeTenantKey)
 	})
+
+	// Admin API key management (only when AUTH_ENABLED is true).
+	if s.adminAPI != nil {
+		r.Post("/admin/api-keys", s.adminAPI.HandleCreateKey)
+		r.Get("/admin/api-keys", s.adminAPI.HandleListKeys)
+		r.Delete("/admin/api-keys/{id}", s.adminAPI.HandleRevokeKey)
+	}
 
 	return r
 }

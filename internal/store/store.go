@@ -114,8 +114,6 @@ type EventFilter struct {
 	// arrays: topic_contains=[{"symbol":"transfer"},{"address":"C..."}].
 	// Uses the GIN index on events.topics.
 	TopicContains json.RawMessage
-	// TxHash filters events emitted by a specific transaction hash.
-	TxHash string // hex-encoded transaction hash
 	// HasValue filters events by whether they carry a value payload.
 	// nil means no constraint; true means value IS NOT NULL;
 	// false means value IS NULL.
@@ -450,6 +448,23 @@ type DeliveryAttempt struct {
 	CreatedAt      time.Time `json:"created_at"`
 }
 
+// AddressRef records one address→event mapping. Populated during ingestion
+// from decoded event topics and value JSON.
+type AddressRef struct {
+	Address string `json:"address"`
+	EventID string `json:"event_id"`
+	Role    string `json:"role"`
+}
+
+// AddressSummary is the aggregate view returned by GetAddressSummary.
+type AddressSummary struct {
+	Address          string   `json:"address"`
+	FirstSeenLedger  int64    `json:"first_seen_ledger"`
+	LastSeenLedger   int64    `json:"last_seen_ledger"`
+	EventCount       int64    `json:"event_count"`
+	DistinctContracts []string `json:"distinct_contracts"`
+}
+
 // Stats summarizes what the indexer has stored so far. VerifiedThroughLedger
 // is the inclusive highest ledger whose stored events have been confirmed
 // to match a fresh RPC fetch; 0 means no ledger has been verified yet.
@@ -575,7 +590,6 @@ type Store interface {
 	// the caller already supplied the contract ID and learns nothing from
 	// being told they lack access to it.
 	GetEvent(ctx context.Context, id string, sc Scope) (Event, error)
-	GetEvent(ctx context.Context, id string) (Event, error)
 	// GetEventsByTxHash returns all events emitted by the transaction
 	// identified by txHash, excluding the event with id excludeID (when
 	// non-empty). Returns an empty slice when no other events exist.
@@ -705,6 +719,12 @@ type Store interface {
 	// SetContractSpec persists a JSON-serialized spec keyed by wasm_hash
 	// and contract_id so subsequent lookups avoid an RPC round trip.
 	SetContractSpec(ctx context.Context, wasmHash, contractID string, specJSON []byte) error
+
+	// Address indexing methods.
+	UpsertAddressRefs(ctx context.Context, refs []AddressRef) error
+	QueryAddressEvents(ctx context.Context, address string, f EventFilter) ([]Event, string, error)
+	CountAddressEvents(ctx context.Context, address string) (int64, error)
+	GetAddressSummary(ctx context.Context, address string) (AddressSummary, error)
 
 	// Stats summarizes the store within sc. Aggregates are scoped because
 	// counts are an information leak in their own right: an unscoped

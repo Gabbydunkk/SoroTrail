@@ -86,6 +86,14 @@ func (s *guardedStore) GetEvent(ctx context.Context, id string, sc Scope) (Event
 }
 
 func (s *guardedStore) EventExists(ctx context.Context, id string, sc Scope) (bool, error) {
+	ctx, cancel := s.wrapContext(ctx, "store.EventExists")
+	defer cancel()
+	start := time.Now()
+	exists, err := s.Store.EventExists(ctx, id, sc)
+	s.logSlowQuery("store.EventExists", start, err)
+	return exists, err
+}
+
 func (s *guardedStore) GetEventsByTxHash(ctx context.Context, txHash, excludeID string) ([]Event, error) {
 	ctx, cancel := s.wrapContext(ctx, "store.GetEventsByTxHash")
 	defer cancel()
@@ -93,15 +101,6 @@ func (s *guardedStore) GetEventsByTxHash(ctx context.Context, txHash, excludeID 
 	events, err := s.Store.GetEventsByTxHash(ctx, txHash, excludeID)
 	s.logSlowQuery("store.GetEventsByTxHash", start, err)
 	return events, err
-}
-
-func (s *guardedStore) EventExists(ctx context.Context, id string) (bool, error) {
-	ctx, cancel := s.wrapContext(ctx, "store.EventExists")
-	defer cancel()
-	start := time.Now()
-	exists, err := s.Store.EventExists(ctx, id, sc)
-	s.logSlowQuery("store.EventExists", start, err)
-	return exists, err
 }
 
 func (s *guardedStore) QueryEvents(ctx context.Context, f EventFilter) ([]Event, string, error) {
@@ -355,4 +354,40 @@ func (s *guardedStore) Ping(ctx context.Context) error {
 	err := s.Store.Ping(ctx)
 	s.logSlowQuery("store.Ping", start, err)
 	return err
+}
+
+func (s *guardedStore) UpsertAddressRefs(ctx context.Context, refs []AddressRef) error {
+	ctx, cancel := s.wrapContext(ctx, "store.UpsertAddressRefs")
+	defer cancel()
+	start := time.Now()
+	err := s.Store.UpsertAddressRefs(ctx, refs)
+	s.logSlowQuery("store.UpsertAddressRefs", start, err)
+	return err
+}
+
+func (s *guardedStore) QueryAddressEvents(ctx context.Context, address string, f EventFilter) ([]Event, string, error) {
+	ctx, cancel := s.wrapContext(ctx, "store.QueryAddressEvents")
+	defer cancel()
+	start := time.Now()
+	events, cursor, err := s.Store.QueryAddressEvents(ctx, address, f)
+	s.logSlowQuery("store.QueryAddressEvents", start, err)
+	return events, cursor, err
+}
+
+func (s *guardedStore) CountAddressEvents(ctx context.Context, address string) (int64, error) {
+	ctx, cancel := s.wrapContext(ctx, "store.CountAddressEvents")
+	defer cancel()
+	start := time.Now()
+	total, err := s.Store.CountAddressEvents(ctx, address)
+	s.logSlowQuery("store.CountAddressEvents", start, err)
+	return total, err
+}
+
+func (s *guardedStore) GetAddressSummary(ctx context.Context, address string) (AddressSummary, error) {
+	ctx, cancel := s.wrapContext(ctx, "store.GetAddressSummary")
+	defer cancel()
+	start := time.Now()
+	summary, err := s.Store.GetAddressSummary(ctx, address)
+	s.logSlowQuery("store.GetAddressSummary", start, err)
+	return summary, err
 }
