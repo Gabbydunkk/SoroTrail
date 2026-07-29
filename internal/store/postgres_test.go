@@ -125,7 +125,7 @@ func TestUpsertEvents_Idempotent(t *testing.T) {
 	require.NoError(t, err)
 	assert.Zero(t, inserted, "duplicate IDs are ignored")
 
-	got, err := st.GetEvent(ctx, eventID(1))
+	got, err := st.GetEvent(ctx, eventID(1), SystemScope())
 	require.NoError(t, err)
 	assert.Equal(t, contractA, got.ContractID)
 	assert.JSONEq(t, `[{"symbol":"transfer"},{"u64":7}]`, string(got.Topics))
@@ -163,9 +163,110 @@ func TestUpsertEvents_CreatesPartitionsAndIsIdempotent(t *testing.T) {
 	assert.NotContains(t, plan, "events_20_29")
 }
 
+// TestPartialIndexForSuccessfulCalls covers migration
+// 0011_partial_index_successful_calls: the partial index over
+// (contract_id, ledger) restricted to in_successful_call = true.
+//
+// It asserts two things. First, that the index exists with the expected
+// shape — indexed columns and partial predicate — by reading its
+// definition straight from the catalog (table-driven over the substrings
+// the definition must contain). Second, that the predicate the index
+// encodes matches query intent: a contract-scoped read filtered to
+// successful calls returns only the successful-call rows and none of the
+// failed-call rows.
+func TestPartialIndexForSuccessfulCalls(t *testing.T) {
+	st := testStore(t)
+	ctx := context.Background()
+
+	// The migration creates the index on the partitioned parent; read its
+	// definition once and assert the pieces that must be present. Reading
+	// pg_indexes.indexdef (rather than assembling from pg_index columns)
+	// keeps the assertions close to how an operator would eyeball the
+	// schema.
+	var indexDef string
+	err := st.pool.QueryRow(ctx,
+		`SELECT indexdef FROM pg_indexes WHERE indexname = $1`,
+		"idx_events_contract_ledger_successful",
+	).Scan(&indexDef)
+	require.NoError(t, err, "partial index should exist after migration")
+
+	defWantSubstrings := []struct {
+		name string
+		want string
+	}{
+		{"indexed on events", " ON "},
+		{"covers contract_id and ledger in order", "(contract_id, ledger)"},
+		{"partial predicate scopes to successful calls", "WHERE (in_successful_call = true)"},
+	}
+	for _, tc := range defWantSubstrings {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Contains(t, indexDef, tc.want)
+		})
+	}
+
+	// The index must also register as a valid, partial index in the
+	// catalog — a plain (non-partial) index on the same columns would
+	// satisfy the substring checks above if the definition string ever
+	// changed shape, so assert indpred is populated directly.
+	var isValid, isPartial bool
+	err = st.pool.QueryRow(ctx, `
+		SELECT i.indisvalid, i.indpred IS NOT NULL
+		FROM pg_index i
+		JOIN pg_class c ON c.oid = i.indexrelid
+		WHERE c.relname = $1`,
+		"idx_events_contract_ledger_successful",
+	).Scan(&isValid, &isPartial)
+	require.NoError(t, err)
+	assert.True(t, isValid, "index should be valid")
+	assert.True(t, isPartial, "index should be partial (have a predicate)")
+
+	// Functional check: seed a mix of successful and failed-call events and
+	// confirm the partial predicate selects exactly the successful subset
+	// for a contract. This is the query shape the index exists to serve.
+	seed := []struct {
+		id         string
+		ledger     int64
+		successful bool
+	}{
+		{eventID(1), 100, true},
+		{eventID(2), 101, false},
+		{eventID(3), 102, true},
+		{eventID(4), 103, false},
+		{eventID(5), 104, true},
+	}
+	events := make([]Event, 0, len(seed))
+	wantSuccessful := make(map[string]bool)
+	for _, s := range seed {
+		e := testEvent(s.id, s.ledger, contractA)
+		e.InSuccessfulCall = s.successful
+		events = append(events, e)
+		if s.successful {
+			wantSuccessful[s.id] = true
+		}
+	}
+	_, err = st.UpsertEvents(ctx, events)
+	require.NoError(t, err)
+
+	rows, err := st.pool.Query(ctx,
+		`SELECT id FROM events WHERE contract_id = $1 AND in_successful_call = true ORDER BY id`,
+		contractA)
+	require.NoError(t, err)
+	defer rows.Close()
+
+	got := make(map[string]bool)
+	for rows.Next() {
+		var id string
+		require.NoError(t, rows.Scan(&id))
+		got[id] = true
+	}
+	require.NoError(t, rows.Err())
+	assert.Equal(t, wantSuccessful, got,
+		"query filtered to successful calls should return only successful-call rows")
+}
+
 func TestGetEvent_NotFound(t *testing.T) {
 	st := testStore(t)
-	_, err := st.GetEvent(context.Background(), "missing")
+	_, err := st.GetEvent(context.Background(), "missing", SystemScope())
 	assert.ErrorIs(t, err, ErrNotFound)
 }
 
@@ -190,36 +291,36 @@ func TestQueryEvents_FiltersAndPagination(t *testing.T) {
 	require.NoError(t, err)
 
 	t.Run("by contract", func(t *testing.T) {
-		got, _, err := st.QueryEvents(ctx, EventFilter{ContractID: contractB})
+		got, _, err := st.QueryEvents(ctx, EventFilter{ContractID: contractB, Scope: WildcardScope()})
 		require.NoError(t, err)
 		assert.Len(t, got, 5)
 	})
 
 	t.Run("by ledger range", func(t *testing.T) {
-		got, _, err := st.QueryEvents(ctx, EventFilter{FromLedger: 103, ToLedger: 105})
+		got, _, err := st.QueryEvents(ctx, EventFilter{FromLedger: 103, ToLedger: 105, Scope: WildcardScope()})
 		require.NoError(t, err)
 		assert.Len(t, got, 3)
 	})
 
 	t.Run("by type", func(t *testing.T) {
-		got, _, err := st.QueryEvents(ctx, EventFilter{Types: []string{"diagnostic"}})
+		got, _, err := st.QueryEvents(ctx, EventFilter{Types: []string{"diagnostic"}, Scope: WildcardScope()})
 		require.NoError(t, err)
 		require.Len(t, got, 1)
 		assert.Equal(t, eventID(3), got[0].ID)
 	})
 
 	t.Run("by multiple types", func(t *testing.T) {
-		got, _, err := st.QueryEvents(ctx, EventFilter{Types: []string{"contract", "diagnostic"}})
+		got, _, err := st.QueryEvents(ctx, EventFilter{Types: []string{"contract", "diagnostic"}, Scope: WildcardScope()})
 		require.NoError(t, err)
 		require.Len(t, got, 10)
 	})
 
 	t.Run("by topic at any position", func(t *testing.T) {
-		got, _, err := st.QueryEvents(ctx, EventFilter{Topic: json.RawMessage(`{"u64":7}`)})
+		got, _, err := st.QueryEvents(ctx, EventFilter{Topic: json.RawMessage(`{"u64":7}`), Scope: WildcardScope()})
 		require.NoError(t, err)
 		assert.Len(t, got, 9, "second-position topic matches too")
 
-		got, _, err = st.QueryEvents(ctx, EventFilter{Topic: json.RawMessage(`{"symbol":"mint"}`)})
+		got, _, err = st.QueryEvents(ctx, EventFilter{Topic: json.RawMessage(`{"symbol":"mint"}`), Scope: WildcardScope()})
 		require.NoError(t, err)
 		assert.Len(t, got, 1)
 	})
@@ -235,6 +336,7 @@ func TestQueryEvents_FiltersAndPagination(t *testing.T) {
 		got, _, err := st.QueryEvents(ctx, EventFilter{
 			Topic0: json.RawMessage(`{"symbol":"transfer"}`),
 			Topic1: json.RawMessage(`{"address":"GABC"}`),
+			Scope:  WildcardScope(),
 		})
 		require.NoError(t, err)
 		assert.Len(t, got, 1)
@@ -248,7 +350,13 @@ func TestQueryEvents_FiltersAndPagination(t *testing.T) {
 			// Bounded to the original 10 events' ledger range so the extra
 			// rows the "topic0 and topic1 positionally" subtest inserts
 			// above (ledgers 200/201) don't inflate this count.
-			page, next, err := st.QueryEvents(ctx, EventFilter{Limit: 3, Cursor: cursor, FromLedger: 101, ToLedger: 110})
+			page, next, err := st.QueryEvents(ctx, EventFilter{
+				Limit:      3,
+				Cursor:     cursor,
+				FromLedger: 101,
+				ToLedger:   110,
+				Scope:      WildcardScope(),
+			})
 			require.NoError(t, err)
 			all = append(all, page...)
 			if next == "" {
@@ -270,6 +378,7 @@ func TestQueryEvents_FiltersAndPagination(t *testing.T) {
 		// contains an element that jsonb-contains {"u64":7}.
 		got, _, err := st.QueryEvents(ctx, EventFilter{
 			TopicContains: json.RawMessage(`[{"u64":7}]`),
+			Scope:         WildcardScope(),
 		})
 		require.NoError(t, err)
 		assert.Len(t, got, 9, "all events with u64:7 (9 out of 10)")
@@ -280,6 +389,7 @@ func TestQueryEvents_FiltersAndPagination(t *testing.T) {
 		// array column — jsonb array @> object is always false in Postgres.
 		got, _, err := st.QueryEvents(ctx, EventFilter{
 			TopicContains: json.RawMessage(`{"u64":7}`),
+			Scope:         WildcardScope(),
 		})
 		require.NoError(t, err)
 		assert.Len(t, got, 0, "object not in array => no match")
@@ -289,6 +399,7 @@ func TestQueryEvents_FiltersAndPagination(t *testing.T) {
 		got, _, err := st.QueryEvents(ctx, EventFilter{
 			ContractID:    contractB,
 			TopicContains: json.RawMessage(`[{"u64":7}]`),
+			Scope:         WildcardScope(),
 		})
 		require.NoError(t, err)
 		// contractB has 5 events (even indexes), all of which contain {"u64":7}.
@@ -298,6 +409,7 @@ func TestQueryEvents_FiltersAndPagination(t *testing.T) {
 	t.Run("by topic_contains no match", func(t *testing.T) {
 		got, _, err := st.QueryEvents(ctx, EventFilter{
 			TopicContains: json.RawMessage(`[{"symbol":"nonexistent"}]`),
+			Scope:         WildcardScope(),
 		})
 		require.NoError(t, err)
 		assert.Len(t, got, 0)
@@ -313,6 +425,7 @@ func TestQueryEvents_FiltersAndPagination(t *testing.T) {
 				Order:      "desc",
 				FromLedger: 101,
 				ToLedger:   110,
+				Scope:      WildcardScope(),
 			})
 			require.NoError(t, err)
 			all = append(all, page...)
@@ -342,6 +455,7 @@ func countEventsInRange(t *testing.T, st *Postgres, fromLedger, toLedger int64) 
 		Limit:      MaxQueryLimit,
 		FromLedger: fromLedger,
 		ToLedger:   toLedger,
+		Scope:      WildcardScope(),
 	})
 	require.NoError(t, err)
 	require.Empty(t, next, "fixture must fit in one max-size page")
@@ -364,6 +478,7 @@ func TestQueryEvents_TimeRange(t *testing.T) {
 	t.Run("from_time only", func(t *testing.T) {
 		got, _, err := st.QueryEvents(ctx, EventFilter{
 			FromTime: time.Date(2026, 7, 23, 12, 0, 0, 0, time.UTC),
+			Scope:    WildcardScope(),
 		})
 		require.NoError(t, err)
 		assert.Len(t, got, 3) // Jul 23, 24, 25 inclusive
@@ -372,6 +487,7 @@ func TestQueryEvents_TimeRange(t *testing.T) {
 	t.Run("to_time only", func(t *testing.T) {
 		got, _, err := st.QueryEvents(ctx, EventFilter{
 			ToTime: time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC),
+			Scope:  WildcardScope(),
 		})
 		require.NoError(t, err)
 		assert.Len(t, got, 2) // Jul 21, 22 inclusive
@@ -381,6 +497,7 @@ func TestQueryEvents_TimeRange(t *testing.T) {
 		got, _, err := st.QueryEvents(ctx, EventFilter{
 			FromTime: time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC),
 			ToTime:   time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC),
+			Scope:    WildcardScope(),
 		})
 		require.NoError(t, err)
 		assert.Len(t, got, 3) // Jul 22, 23, 24
@@ -391,6 +508,7 @@ func TestQueryEvents_TimeRange(t *testing.T) {
 			FromLedger: 104,
 			ToLedger:   106,
 			FromTime:   time.Date(2026, 7, 23, 12, 0, 0, 0, time.UTC),
+			Scope:      WildcardScope(),
 		})
 		require.NoError(t, err)
 		assert.Len(t, got, 2) // ledger 104+106, time >= Jul23 -> events 4,5 (ledger 104,105 -> Jul24,25)
@@ -399,6 +517,7 @@ func TestQueryEvents_TimeRange(t *testing.T) {
 	t.Run("empty window returns nothing", func(t *testing.T) {
 		got, _, err := st.QueryEvents(ctx, EventFilter{
 			FromTime: time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC),
+			Scope:    WildcardScope(),
 		})
 		require.NoError(t, err)
 		assert.Len(t, got, 0)
@@ -508,7 +627,7 @@ func TestMigrate_UpgradesLegacyEventsTable(t *testing.T) {
 
 	require.NoError(t, Migrate(dbURL))
 
-	got, err := st.GetEvent(ctx, original.ID)
+	got, err := st.GetEvent(ctx, original.ID, SystemScope())
 	require.NoError(t, err)
 	assert.Equal(t, original.ContractID, got.ContractID)
 	assert.Equal(t, original.RawTopicXDR, got.RawTopicXDR)
@@ -597,7 +716,7 @@ func TestRemoveWatchedContract_PreservesEvents(t *testing.T) {
 	assert.ErrorIs(t, err, ErrNotFound)
 
 	// Stored events for the removed contract are intact and queryable.
-	got, _, err := st.QueryEvents(ctx, EventFilter{ContractID: contractA})
+	got, _, err := st.QueryEvents(ctx, EventFilter{ContractID: contractA, Scope: WildcardScope()})
 	require.NoError(t, err)
 	require.Len(t, got, 2, "removal NEVER deletes event rows — history is preserved")
 	assert.Equal(t, int64(100), got[0].Ledger)
@@ -616,13 +735,14 @@ func TestStats(t *testing.T) {
 	require.NoError(t, st.SaveIngestionState(ctx, IngestionState{LastIngestedLedger: 101}))
 	require.NoError(t, st.AddWatchedContract(ctx, contractA))
 
-	stats, err := st.Stats(ctx)
+	stats, err := st.Stats(ctx, SystemScope())
 	require.NoError(t, err)
 	assert.Equal(t, int64(2), stats.TotalEvents)
 	assert.Equal(t, int64(101), stats.LastIngestedLedger)
 	assert.Equal(t, int64(100), stats.OldestStoredLedger)
 	assert.Equal(t, int64(2), stats.ContractCount)
 	assert.Equal(t, int64(1), stats.WatchedContracts)
+	assert.Greater(t, stats.TableSizeBytes, int64(0), "table_size_bytes should report the on-disk size of the events table")
 
 	var plan string
 	rows, err := st.pool.Query(ctx, `EXPLAIN (COSTS OFF) SELECT coalesce(min(ledger), 0) FROM events`)
@@ -657,6 +777,7 @@ func TestQueryEvents_PositionalTopics(t *testing.T) {
 	got, _, err := st.QueryEvents(ctx, EventFilter{
 		Topic0: json.RawMessage(`{"symbol":"transfer"}`),
 		Topic1: json.RawMessage(`{"address":"GABC"}`),
+		Scope:  WildcardScope(),
 	})
 	require.NoError(t, err)
 	assert.Len(t, got, 1)
