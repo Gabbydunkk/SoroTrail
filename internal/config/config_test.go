@@ -327,6 +327,50 @@ func TestLoad(t *testing.T) {
 			},
 			wantErr: "RATE_LIMIT_RPS must be non-negative",
 		},
+		{
+			name: "rpc retry defaults",
+			env: map[string]string{
+				"DATABASE_URL": "postgres://localhost/db",
+			},
+			check: func(t *testing.T, c Config) {
+				assert.Equal(t, 3, c.RPCMaxAttempts)
+				assert.Equal(t, 500*time.Millisecond, c.RPCBaseBackoff)
+				assert.Equal(t, 30*time.Second, c.RPCMaxBackoff)
+				assert.True(t, c.RPCJitter)
+			},
+		},
+		{
+			name: "rpc retry custom values",
+			env: map[string]string{
+				"DATABASE_URL":     "postgres://localhost/db",
+				"RPC_MAX_ATTEMPTS": "5",
+				"RPC_BASE_BACKOFF": "1s",
+				"RPC_MAX_BACKOFF":  "60s",
+				"RPC_JITTER":       "false",
+			},
+			check: func(t *testing.T, c Config) {
+				assert.Equal(t, 5, c.RPCMaxAttempts)
+				assert.Equal(t, time.Second, c.RPCBaseBackoff)
+				assert.Equal(t, 60*time.Second, c.RPCMaxBackoff)
+				assert.False(t, c.RPCJitter)
+			},
+		},
+		{
+			name: "rpc retry zero max attempts rejected",
+			env: map[string]string{
+				"DATABASE_URL":     "postgres://localhost/db",
+				"RPC_MAX_ATTEMPTS": "0",
+			},
+			wantErr: "RPC_MAX_ATTEMPTS must be positive",
+		},
+		{
+			name: "rpc retry negative base backoff rejected",
+			env: map[string]string{
+				"DATABASE_URL":     "postgres://localhost/db",
+				"RPC_BASE_BACKOFF": "-1s",
+			},
+			wantErr: "RPC_BASE_BACKOFF must be positive",
+		},
 	}
 
 	for _, tt := range tests {

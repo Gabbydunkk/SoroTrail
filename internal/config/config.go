@@ -38,6 +38,16 @@ type Config struct {
 	HorizonURL      string  `env:"HORIZON_URL" envDefault:"https://horizon-testnet.stellar.org"`
 	BackfillRateRPS float64 `env:"BACKFILL_RATE_RPS" envDefault:"10"`
 
+	// RPC retry/backoff configuration. These control how many times a
+	// failing RPC call is retried, the base (exponential) backoff duration,
+	// the maximum backoff cap, and whether random jitter is added between
+	// attempts. Applied uniformly to every RPC call (getEvents,
+	// getLatestLedger, getHealth, getLedgerEntries).
+	RPCMaxAttempts  int           `env:"RPC_MAX_ATTEMPTS" envDefault:"3"`
+	RPCBaseBackoff  time.Duration `env:"RPC_BASE_BACKOFF" envDefault:"500ms"`
+	RPCMaxBackoff   time.Duration `env:"RPC_MAX_BACKOFF" envDefault:"30s"`
+	RPCJitter       bool          `env:"RPC_JITTER" envDefault:"true"`
+
 	// Audit config. AUDIT_ENABLED=false (default) disables the auditor
 	// entirely; the binary behaves exactly like the pre-audit build.
 	AuditEnabled        bool          `env:"AUDIT_ENABLED" envDefault:"false"`
@@ -64,6 +74,19 @@ type Config struct {
 	// request gets a 503 with a "no API_KEY configured" message), so
 	// writes are never open even when other auth would be off.
 	APIKey string `env:"API_KEY"`
+
+	// AuthEnabled gates all endpoints (except /health) behind API key
+	// authentication. When true, every request must carry an
+	// Authorization: Bearer <key> header matching a hashed key in the
+	// api_keys table. When false (default), the binary behaves exactly
+	// as before — no auth required for read endpoints.
+	AuthEnabled bool `env:"AUTH_ENABLED" envDefault:"false"`
+	// AdminAPIKey, when set and AUTH_ENABLED is true, seeds a bootstrap
+	// API key at startup if the api_keys table is empty. The key is shown
+	// once in the startup log (as a single log line) and then hashed into
+	// the database. Deployments with AUTH_ENABLED=true should always set
+	// this; deployments with AUTH_ENABLED=false can leave it unset.
+	AdminAPIKey string `env:"ADMIN_API_KEY"`
 	// HTTP rate limiting (per client). RATE_LIMIT_RPS / RATE_LIMIT_BURST
 	// are both unset (zero) by default, which disables the limiter
 	// entirely — a no-op middleware — so deployments without this turned
@@ -293,6 +316,14 @@ func (c Config) Validate() error {
 	if c.ShutdownTimeout < 0 {
 		return fmt.Errorf("SHUTDOWN_TIMEOUT must be non-negative, got %s", c.ShutdownTimeout)
 	}
+	if c.RPCMaxAttempts <= 0 {
+		return fmt.Errorf("RPC_MAX_ATTEMPTS must be positive, got %d", c.RPCMaxAttempts)
+	}
+	if c.RPCBaseBackoff <= 0 {
+		return fmt.Errorf("RPC_BASE_BACKOFF must be positive, got %s", c.RPCBaseBackoff)
+	}
+	if c.RPCMaxBackoff <= 0 {
+		return fmt.Errorf("RPC_MAX_BACKOFF must be positive, got %s", c.RPCMaxBackoff)
 	if c.SweepConcurrency < 1 {
 		return fmt.Errorf("SWEEP_CONCURRENCY must be positive, got %d", c.SweepConcurrency)
 	}
@@ -415,6 +446,10 @@ func (c Config) LoggableFields() []any {
 
 	return []any{
 		"rpc_url", c.RPCURL,
+		"rpc_max_attempts", c.RPCMaxAttempts,
+		"rpc_base_backoff", c.RPCBaseBackoff,
+		"rpc_max_backoff", c.RPCMaxBackoff,
+		"rpc_jitter", c.RPCJitter,
 		"database_url", dbURL,
 		"poll_interval", c.PollInterval,
 		"http_addr", c.HTTPAddr,
